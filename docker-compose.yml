@@ -1,0 +1,83 @@
+version: '3.9'
+
+services:
+
+  api:
+    build:
+      context: ./src/CommerceHub.Api
+      dockerfile: Dockerfile
+    container_name: commerce_hub_api
+    ports:
+      - "8080:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - MongoDbSettings__ConnectionString=mongodb://mongo:27017
+      - MongoDbSettings__DatabaseName=CommerceHub
+      - MongoDbSettings__OrdersCollection=Orders
+      - MongoDbSettings__ProductsCollection=Products
+      - RabbitMqSettings__Host=rabbitmq
+      - RabbitMqSettings__Port=5672
+      - RabbitMqSettings__Username=guest
+      - RabbitMqSettings__Password=guest
+      - RabbitMqSettings__ExchangeName=commerce_hub
+      - RabbitMqSettings__OrderCreatedRoutingKey=order.created
+    depends_on:
+      mongo:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - commerce_net
+    restart: on-failure
+
+  mongo:
+    image: mongo:7.0
+    container_name: commerce_hub_mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping').ok", "--quiet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - commerce_net
+
+  mongo-seed:
+    build:
+      context: ./mongo-seed
+      dockerfile: Dockerfile
+    container_name: commerce_hub_seed
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - commerce_net
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: commerce_hub_rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - commerce_net
+
+volumes:
+  mongo_data:
+  rabbitmq_data:
+
+networks:
+  commerce_net:
+    driver: bridge

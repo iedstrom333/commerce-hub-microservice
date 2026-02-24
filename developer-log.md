@@ -1,0 +1,166 @@
+# Developer Log — Commerce Hub Microservice
+
+This log documents the AI-augmented development process for the Commerce Hub assignment, detailing AI strategy, human corrections, and test generation.
+
+---
+
+## AI Strategy
+
+### Context Injection Approach
+
+Rather than asking the AI to generate boilerplate code, I front-loaded it with the full architectural schema before any code was written. The initial prompt included:
+
+- **Data schemas** (Order, Product documents with field types and MongoDB BSON attributes)
+- **Atomicity constraints** (MongoDB single-document guarantee, compensating transaction requirement for standalone instance)
+- **Interface contracts** (all four endpoint behaviors, including idempotency semantics for PUT)
+- **Technology constraints** (.NET 8, MongoDB.Driver 3.x, RabbitMQ.Client 7.x with async API)
+
+This upfront context allowed the AI to generate architecturally correct code on the first pass rather than producing generic templates that needed heavy refactoring.
+
+### Layered Code Generation
+
+Code was generated in dependency order: models → interfaces → repositories → services → controllers. This prevented circular dependency issues and let each layer be validated before the next was built.
+
+### Test Generation Strategy
+
+Unit tests were generated after specifying exact scenarios rather than asking the AI to "write tests." Each scenario was stated with:
+1. The observable behavior (what should happen)
+2. The verification target (which mock interaction to assert)
+3. The edge case reason (why this specific scenario matters)
+
+This produced tests that assert intent, not implementation details.
+
+---
+
+## Human Audit: Three Specific Corrections
+
+### Correction 1: RabbitMQ Singleton Registration Pattern
+
+**AI's initial output:** The AI suggested registering `RabbitMqEventPublisher` as a scoped service and creating a new connection per request:
+
+```csharp
+// AI's initial suggestion (incorrect)
+services.AddScoped<IEventPublisher, RabbitMqEventPublisher>();
+```
+
+**Problem identified:** Creating a new TCP connection to RabbitMQ for every HTTP request would cause connection pool exhaustion under load and dramatically slow response times. RabbitMQ connections are expensive (~100ms to establish) and meant to be long-lived.
+
+**Human correction:** Changed to a singleton registered via async factory that blocks synchronously only once at startup:
+
+```csharp
+// Corrected implementation
+services.AddSingleton<IEventPublisher>(sp =>
+{
+    var settings = sp.GetRequiredService<IOptions<RabbitMqSettings>>().Value;
+    var logger = sp.GetRequiredService<ILogger<RabbitMqEventPublisher>>();
+    return RabbitMqEventPublisher.CreateAsync(settings, logger)
+        .GetAwaiter().GetResult();
+});
+```
+
+The async factory pattern was required because `IChannel.CreateChannelAsync()` in RabbitMQ.Client v7 is asynchronous and cannot be called in a constructor. The `GetAwaiter().GetResult()` blocking call is acceptable here because it occurs exactly once during application startup, not during request handling.
+
+---
+
+### Correction 2: Checkout Rollback Not Implemented
+
+**AI's initial output:** The AI generated a checkout flow that checked all stock levels first (read-only), then decremented:
+
+```csharp
+// AI's initial suggestion (TOCTOU race condition)
+foreach (var item in dto.Items)
+{
+    var product = await _productRepo.GetByIdAsync(item.ProductId, ct);
+    if (product.StockQuantity < item.Quantity)
+        return Result.Fail("Insufficient stock");
+}
+// Then decrement each item (not atomic — another request could win between check and update)
+foreach (var item in dto.Items)
+    await _productRepo.DecrementStockAsync(item.ProductId, item.Quantity, ct);
+```
+
+**Problem identified:** This is a classic check-then-act race condition (TOCTOU — Time of Check, Time of Use). Between the stock check and the decrement, another concurrent request could successfully claim the same inventory, causing stock to go negative.
+
+**Human correction:** Two changes were enforced:
+
+1. Replaced the two-step read+write with a single atomic `FindOneAndUpdateAsync` using a compound filter:
+
+```csharp
+// Filter combines existence check AND stock guard in one atomic DB round-trip
+var filter = Filter.And(
+    Filter.Eq(p => p.Id, productId),
+    Filter.Gte(p => p.StockQuantity, quantity)  // Gte = "greater than or equal"
+);
+var update = Update.Inc(p => p.StockQuantity, -quantity);
+return await _collection.FindOneAndUpdateAsync(filter, update, options, ct);
+```
+
+2. Added compensating rollback: if any item in the checkout fails after others have been decremented, all decremented items are re-incremented via `IncrementStockAsync`.
+
+---
+
+### Correction 3: PUT Shipped Guard — Service vs. Repository Enforcement
+
+**AI's initial output:** The Shipped guard was only checked in `OrderService.UpdateAsync` before calling the repository:
+
+```csharp
+// AI's initial suggestion — guard only in service layer
+if (existing.Status == OrderStatus.Shipped)
+    return Result.Fail("Cannot modify a shipped order.");
+await _orderRepo.ReplaceAsync(id, updated, ct);
+```
+
+**Problem identified:** This creates a TOCTOU race condition. Between the service reading the order status and calling `ReplaceAsync`, another concurrent request could change the order status to Shipped. The guard in the service layer would pass, but the second request would incorrectly replace a Shipped order.
+
+**Human correction:** The guard was pushed into the repository using a compound MongoDB filter, making the check and the replacement an atomic operation:
+
+```csharp
+// Repository-level atomic guard — prevents race condition
+var filter = Filter.And(
+    Filter.Eq(o => o.Id, id),
+    Filter.Ne(o => o.Status, OrderStatus.Shipped)  // Ne = "not equal"
+);
+return await _collection.FindOneAndReplaceAsync(filter, order, options, ct);
+// Returns null if: not found OR status == Shipped
+```
+
+The service layer check was kept as well — it provides a fast-path failure response with a meaningful error message before making a DB round-trip. The repository-level guard is the actual concurrency safety mechanism.
+
+---
+
+## Test Generation for Edge Cases
+
+AI was prompted with specific edge case scenarios rather than asked to "generate comprehensive tests":
+
+### Edge Case: Mid-Checkout Stock Failure Rollback
+
+Prompt given to AI:
+> "Generate a test where the first of two checkout items decrements successfully, but the second item returns null (insufficient stock). Assert that: (a) the result is a failure, (b) IncrementStockAsync is called once for the first item with the exact quantity, (c) CreateAsync is never called on the order repository."
+
+This produced `CheckoutAsync_WhenSecondItemOutOfStock_RollsBackFirstItemAndReturnsFailure` which validates the compensating transaction behavior that is easy to overlook.
+
+### Edge Case: Publisher Failure Does Not Rollback
+
+During review, I identified that the AI's first draft would have rolled back stock if the RabbitMQ publish failed. This is incorrect behavior — the order is already committed to MongoDB, so rolling back stock would create a phantom order with no corresponding inventory decrement.
+
+The AI was prompted:
+> "The event publish is best-effort. If `PublishAsync` throws, log the error and return success — the order is committed. Do NOT roll back stock."
+
+This produced the correct try/catch structure around the publish call that logs but does not propagate the exception.
+
+### Edge Case: Zero Delta for Stock Adjustment
+
+The `PATCH /api/products/{id}/stock` endpoint accepts a `delta` field. A zero delta is semantically meaningless and could mask client bugs. The AI was asked to add early rejection before the DB call, resulting in the `AdjustStockAsync_WhenDeltaIsZero_ReturnsFailureWithoutCallingRepo` test that verifies no DB round-trip occurs for this invalid input.
+
+---
+
+## Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Checkout rollback strategy | Compensating transactions | MongoDB replica set (required for ACID transactions) not available in standalone docker-compose |
+| Result type | Custom `Result<T>` record | No external library dependency; keeps service return types explicit |
+| Event publish failure | Log, don't rollback | Order is committed; stock rollback would create inconsistency |
+| Shipped guard placement | Both service and repository | Service: fast response; Repository: atomic race-condition safety |
+| RabbitMQ exchange type | `topic` | Allows future consumers to subscribe to patterns (e.g., `order.*`) |
+| Message delivery mode | `Persistent` | Messages survive broker restart |

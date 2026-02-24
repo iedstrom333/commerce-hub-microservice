@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(git init:*)",
+      "Bash(gh repo create:*)",
+      "Bash(dotnet --list-sdks:*)",
+      "Bash(dotnet --list-runtimes:*)",
+      "Bash(brew:*)",
+      "Bash(brew list:*)",
+      "Bash(curl:*)",
+      "Bash(chmod:*)",
+      "Bash(/tmp/dotnet-install.sh:*)",
+      "Bash(export PATH:*)",
+      "Bash(dotnet:*)",
+      "Bash(.gitignore:*)",
+      "Bash(__NEW_LINE_58493a404dd002f6__ git add .gitignore CommerceHub.sln src/)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}
