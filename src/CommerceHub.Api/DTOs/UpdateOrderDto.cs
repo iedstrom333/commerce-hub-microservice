@@ -6,6 +6,7 @@ namespace CommerceHub.Api.DTOs;
 public class UpdateOrderDto
 {
     [Required]
+    [MaxLength(50)]
     public required string CustomerId { get; set; }
 
     [Required]

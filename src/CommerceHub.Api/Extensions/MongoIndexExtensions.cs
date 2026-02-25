@@ -1,5 +1,6 @@
 using CommerceHub.Api.Configuration;
 using CommerceHub.Api.Models;
+using MongoDB.Bson;
 using MongoDB.Driver;
 
 namespace CommerceHub.Api.Extensions;
@@ -27,6 +28,17 @@ public static class MongoIndexExtensions
             new CreateIndexModel<Order>(
                 Builders<Order>.IndexKeys.Ascending(x => x.CustomerId),
                 new CreateIndexOptions { Name = "customerId" }));
+
+        // Products: sku unique (data integrity) + stockQuantity (stock-guard filter performance)
+        var products = database.GetCollection<Product>(settings.ProductsCollection);
+        await products.Indexes.CreateManyAsync([
+            new CreateIndexModel<Product>(
+                Builders<Product>.IndexKeys.Ascending(x => x.Sku),
+                new CreateIndexOptions { Unique = true, Name = "sku_unique" }),
+            new CreateIndexModel<Product>(
+                Builders<Product>.IndexKeys.Ascending(x => x.StockQuantity),
+                new CreateIndexOptions { Name = "stockQuantity" })
+        ]);
 
         // IdempotencyKeys: TTL index expires documents after 24 hours automatically.
         var idempotencyKeys = database.GetCollection<IdempotencyKey>(settings.IdempotencyKeysCollection);

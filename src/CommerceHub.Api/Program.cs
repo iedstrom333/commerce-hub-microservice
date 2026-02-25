@@ -18,6 +18,7 @@ builder.Services.AddMongoDB();
 builder.Services.AddRabbitMq();
 builder.Services.AddApplicationServices();
 
+builder.Services.AddResponseCompression(opts => opts.EnableForHttps = true);
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 builder.Services.AddHealthChecks()
@@ -39,11 +40,15 @@ using (var scope = app.Services.CreateScope())
     await db.EnsureIndexesAsync(settings);
 }
 
+app.UseResponseCompression();
 app.UseExceptionHandler();
 app.MapHealthChecks("/health");
 
-app.UseSwagger();
-app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Commerce Hub API v1"));
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Commerce Hub API v1"));
+}
 
 app.MapControllers();
 

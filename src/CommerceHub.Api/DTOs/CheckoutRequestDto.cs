@@ -5,6 +5,7 @@ namespace CommerceHub.Api.DTOs;
 public class CheckoutRequestDto
 {
     [Required]
+    [MaxLength(50)]
     public required string CustomerId { get; set; }
 
     [Required]
@@ -15,6 +16,7 @@ public class CheckoutRequestDto
 public class CheckoutItemDto
 {
     [Required]
+    [MaxLength(24, ErrorMessage = "ProductId must be a 24-character ObjectId.")]
     public required string ProductId { get; set; }
 
     [Range(1, int.MaxValue, ErrorMessage = "Quantity must be at least 1.")]

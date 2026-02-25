@@ -154,6 +154,43 @@ The `PATCH /api/products/{id}/stock` endpoint accepts a `delta` field. A zero de
 
 ---
 
+### Correction 4: CancellationToken Bug in Fire-and-Forget Audit Writes
+
+**Discovery:** After the audit log system was implemented, I inspected the MongoDB `AuditLogs` collection directly and found it completely empty despite placing orders and adjusting stock. No errors were surfaced in the API responses.
+
+**Root cause identified:** The fire-and-forget audit writes used the HTTP request's `CancellationToken`:
+
+```csharp
+// Buggy — ct is the HTTP request's CancellationToken
+_ = _auditRepo.LogAsync(entry, ct);
+```
+
+ASP.NET Core cancels this token as soon as the HTTP response is sent. Since the fire-and-forget task had not yet started, `InsertOneAsync` received an already-cancelled token, threw `OperationCanceledException`, and the silent try/catch in `LogAsync` discarded it. The collection remained empty.
+
+**Human correction:** Changed all four fire-and-forget `LogAsync` calls to `CancellationToken.None`:
+
+```csharp
+// Fixed — audit write lifecycle is independent of the HTTP request
+_ = _auditRepo.LogAsync(entry, CancellationToken.None);
+```
+
+This was non-obvious because the bug produced no errors — only silent data loss. Discovering it required manually querying the database after placing a test order.
+
+---
+
+### Contribution: Manual Testing Guide (`manualTesting.txt`)
+
+I wrote a comprehensive manual testing guide covering all four system actors (Customer, Warehouse Manager, Fulfillment Staff, Downstream Service) with exact curl commands for every happy path and edge case. The guide covers:
+
+- Customer: happy path order, zero/negative quantity rejection, insufficient stock, mid-checkout rollback verification
+- Warehouse: restock, manual decrement, zero delta, negative-beyond-stock, product not found
+- Fulfillment: state machine transitions (Pending → Processing → Shipped), terminal-state lock (409)
+- Downstream: RabbitMQ Management UI inspection of queued `OrderCreatedEvent` payloads
+
+The guide also documents the reset procedure (`docker-compose down -v && docker-compose up --build`) needed to restore seed stock levels between test sessions.
+
+---
+
 ## Key Design Decisions
 
 | Decision | Choice | Rationale |
