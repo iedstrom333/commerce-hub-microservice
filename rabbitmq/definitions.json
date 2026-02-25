@@ -1,0 +1,50 @@
+{
+  "vhosts": [{ "name": "/" }],
+  "users": [
+    {
+      "name": "guest",
+      "password_hash": "LMnSNRGDtfQIGNLv2cokx8S3LsfEWSNLWXYj7o2hkqjSa7C9",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": "administrator"
+    }
+  ],
+  "permissions": [
+    {
+      "user": "guest",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "commerce_hub",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "queues": [
+    {
+      "name": "orders.created",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    }
+  ],
+  "bindings": [
+    {
+      "source": "commerce_hub",
+      "vhost": "/",
+      "destination": "orders.created",
+      "destination_type": "queue",
+      "routing_key": "order.created",
+      "arguments": {}
+    }
+  ]
+}

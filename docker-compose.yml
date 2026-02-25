@@ -65,6 +65,8 @@ services:
       - "15672:15672"
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
+      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 10s
