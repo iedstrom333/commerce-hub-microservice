@@ -21,6 +21,17 @@ public class OrderRepository : IOrderRepository
         return await _collection.Find(filter).FirstOrDefaultAsync(ct);
     }
 
+    public async Task<List<Order>> GetAllAsync(string? customerId = null, CancellationToken ct = default)
+    {
+        var filter = customerId is null
+            ? Builders<Order>.Filter.Empty
+            : Builders<Order>.Filter.Eq(o => o.CustomerId, customerId);
+
+        return await _collection.Find(filter)
+            .SortByDescending(o => o.CreatedAt)
+            .ToListAsync(ct);
+    }
+
     public async Task<Order> CreateAsync(Order order, CancellationToken ct = default)
     {
         await _collection.InsertOneAsync(order, cancellationToken: ct);

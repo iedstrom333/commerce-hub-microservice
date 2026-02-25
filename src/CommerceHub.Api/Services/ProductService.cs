@@ -1,18 +1,34 @@
 using CommerceHub.Api.Common;
 using CommerceHub.Api.DTOs;
 using CommerceHub.Api.Interfaces;
+using CommerceHub.Api.Models;
 
 namespace CommerceHub.Api.Services;
 
 public class ProductService : IProductService
 {
     private readonly IProductRepository _productRepo;
+    private readonly IAuditRepository _auditRepo;
     private readonly ILogger<ProductService> _logger;
 
-    public ProductService(IProductRepository productRepo, ILogger<ProductService> logger)
+    public ProductService(IProductRepository productRepo, IAuditRepository auditRepo, ILogger<ProductService> logger)
     {
         _productRepo = productRepo;
+        _auditRepo = auditRepo;
         _logger = logger;
+    }
+
+    public async Task<List<ProductResponseDto>> GetAllAsync(CancellationToken ct = default)
+    {
+        var products = await _productRepo.GetAllAsync(ct);
+        return products.Select(p => new ProductResponseDto
+        {
+            Id            = p.Id!,
+            Name          = p.Name,
+            Sku           = p.Sku,
+            Price         = p.Price,
+            StockQuantity = p.StockQuantity
+        }).ToList();
     }
 
     public async Task<Result<ProductStockResponseDto>> AdjustStockAsync(
@@ -40,6 +56,18 @@ public class ProductService : IProductService
         _logger.LogInformation(
             "Stock adjusted by {Delta} for product {ProductId}. New quantity: {Quantity}.",
             delta, productId, product.StockQuantity);
+
+        _ = _auditRepo.LogAsync(new AuditLog
+        {
+            Timestamp = DateTime.UtcNow,
+            Event = "StockAdjusted",
+            Actor = "Warehouse",
+            EntityType = "Product",
+            EntityId = productId,
+            Delta = delta,
+            StockBefore = product.StockQuantity - delta,
+            StockAfter = product.StockQuantity
+        }, CancellationToken.None);
 
         return Result<ProductStockResponseDto>.Ok(new ProductStockResponseDto
         {

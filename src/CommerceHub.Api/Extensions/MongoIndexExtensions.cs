@@ -27,5 +27,12 @@ public static class MongoIndexExtensions
             new CreateIndexModel<Order>(
                 Builders<Order>.IndexKeys.Ascending(x => x.CustomerId),
                 new CreateIndexOptions { Name = "customerId" }));
+
+        // IdempotencyKeys: TTL index expires documents after 24 hours automatically.
+        var idempotencyKeys = database.GetCollection<IdempotencyKey>(settings.IdempotencyKeysCollection);
+        await idempotencyKeys.Indexes.CreateOneAsync(
+            new CreateIndexModel<IdempotencyKey>(
+                Builders<IdempotencyKey>.IndexKeys.Ascending(x => x.CreatedAt),
+                new CreateIndexOptions { ExpireAfter = TimeSpan.FromHours(24), Name = "ttl_createdAt_24h" }));
     }
 }

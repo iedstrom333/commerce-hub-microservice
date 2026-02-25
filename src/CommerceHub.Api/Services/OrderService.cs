@@ -22,6 +22,7 @@ public class OrderService : IOrderService
     private readonly IProductRepository _productRepo;
     private readonly IEventPublisher _publisher;
     private readonly IAuditRepository _auditRepo;
+    private readonly IIdempotencyRepository _idempotencyRepo;
     private readonly RabbitMqSettings _mqSettings;
     private readonly ILogger<OrderService> _logger;
 
@@ -31,18 +32,38 @@ public class OrderService : IOrderService
         IEventPublisher publisher,
         IOptions<RabbitMqSettings> mqSettings,
         IAuditRepository auditRepo,
+        IIdempotencyRepository idempotencyRepo,
         ILogger<OrderService> logger)
     {
-        _orderRepo = orderRepo;
-        _productRepo = productRepo;
-        _publisher = publisher;
-        _mqSettings = mqSettings.Value;
-        _auditRepo = auditRepo;
-        _logger = logger;
+        _orderRepo        = orderRepo;
+        _productRepo      = productRepo;
+        _publisher        = publisher;
+        _mqSettings       = mqSettings.Value;
+        _auditRepo        = auditRepo;
+        _idempotencyRepo  = idempotencyRepo;
+        _logger           = logger;
     }
 
-    public async Task<Result<OrderResponseDto>> CheckoutAsync(CheckoutRequestDto dto, CancellationToken ct = default)
+    public async Task<List<OrderResponseDto>> GetAllAsync(string? customerId = null, CancellationToken ct = default)
     {
+        var orders = await _orderRepo.GetAllAsync(customerId, ct);
+        return orders.Select(MapToDto).ToList();
+    }
+
+    public async Task<Result<OrderResponseDto>> CheckoutAsync(CheckoutRequestDto dto, string? idempotencyKey = null, CancellationToken ct = default)
+    {
+        // Idempotency: return the cached order if this key was already used.
+        if (idempotencyKey is not null)
+        {
+            var existingOrderId = await _idempotencyRepo.GetOrderIdAsync(idempotencyKey, ct);
+            if (existingOrderId is not null)
+            {
+                var cachedOrder = await _orderRepo.GetByIdAsync(existingOrderId, ct);
+                if (cachedOrder is not null)
+                    return Result<OrderResponseDto>.Ok(MapToDto(cachedOrder));
+            }
+        }
+
         // Service-layer validation: guard against negative or zero quantities.
         // DataAnnotations on the DTO also catch this at the controller boundary,
         // but we enforce it here defensively to keep the service self-contained.
@@ -94,6 +115,10 @@ public class OrderService : IOrderService
             };
 
             var created = await _orderRepo.CreateAsync(order, ct);
+
+            // Persist the idempotency key so that retries with the same key return this order.
+            if (idempotencyKey is not null)
+                await _idempotencyRepo.StoreAsync(idempotencyKey, created.Id!, CancellationToken.None);
 
             // Write audit entries for each successfully decremented product now that we have the order ID.
             foreach (var (productId, qty, stockAfter) in decremented)

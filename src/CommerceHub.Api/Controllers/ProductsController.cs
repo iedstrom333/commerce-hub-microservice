@@ -17,6 +17,17 @@ public class ProductsController : ControllerBase
     }
 
     /// <summary>
+    /// Returns all products, sorted by name.
+    /// </summary>
+    [HttpGet]
+    [ProducesResponseType(typeof(List<ProductResponseDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetAll(CancellationToken ct)
+    {
+        var products = await _productService.GetAllAsync(ct);
+        return Ok(products);
+    }
+
+    /// <summary>
     /// Atomically adjusts product stock. Prevents stock from going below zero.
     /// Use a positive delta to restock; use a negative delta to decrement.
     /// </summary>

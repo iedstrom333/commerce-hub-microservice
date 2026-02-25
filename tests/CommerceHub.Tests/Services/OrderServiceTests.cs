@@ -17,19 +17,21 @@ namespace CommerceHub.Tests.Services;
 [TestFixture]
 public class OrderServiceTests
 {
-    private IOrderRepository   _orderRepo   = null!;
-    private IProductRepository _productRepo = null!;
-    private IEventPublisher    _publisher   = null!;
-    private IAuditRepository   _auditRepo   = null!;
-    private OrderService       _sut         = null!;
+    private IOrderRepository       _orderRepo       = null!;
+    private IProductRepository     _productRepo     = null!;
+    private IEventPublisher        _publisher       = null!;
+    private IAuditRepository       _auditRepo       = null!;
+    private IIdempotencyRepository _idempotencyRepo = null!;
+    private OrderService           _sut             = null!;
 
     [SetUp]
     public void SetUp()
     {
-        _orderRepo   = Substitute.For<IOrderRepository>();
-        _productRepo = Substitute.For<IProductRepository>();
-        _publisher   = Substitute.For<IEventPublisher>();
-        _auditRepo   = Substitute.For<IAuditRepository>();
+        _orderRepo       = Substitute.For<IOrderRepository>();
+        _productRepo     = Substitute.For<IProductRepository>();
+        _publisher       = Substitute.For<IEventPublisher>();
+        _auditRepo       = Substitute.For<IAuditRepository>();
+        _idempotencyRepo = Substitute.For<IIdempotencyRepository>();
 
         var mqSettings = Options.Create(new RabbitMqSettings
         {
@@ -46,6 +48,7 @@ public class OrderServiceTests
             _publisher,
             mqSettings,
             _auditRepo,
+            _idempotencyRepo,
             Substitute.For<ILogger<OrderService>>());
     }
 
@@ -61,7 +64,7 @@ public class OrderServiceTests
             Items      = [new CheckoutItemDto { ProductId = TestDataBuilder.ProductId1, Quantity = -1 }]
         };
 
-        var result = await _sut.CheckoutAsync(request, CancellationToken.None);
+        var result = await _sut.CheckoutAsync(request, ct: CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();
         result.Error.Should().Contain("Quantity");
@@ -100,7 +103,7 @@ public class OrderServiceTests
 
         var result = await _sut.CheckoutAsync(
             TestDataBuilder.BuildCheckoutRequest(quantity: requested),
-            CancellationToken.None);
+            ct: CancellationToken.None);
 
         result.IsSuccess.Should().BeTrue();
         result.Value!.Status.Should().Be(OrderStatus.Pending);
@@ -138,7 +141,7 @@ public class OrderServiceTests
 
         await _sut.CheckoutAsync(
             TestDataBuilder.BuildCheckoutRequest(quantity: 2),
-            CancellationToken.None);
+            ct: CancellationToken.None);
 
         await _publisher
             .Received(1)
@@ -174,7 +177,7 @@ public class OrderServiceTests
             ]
         };
 
-        var result = await _sut.CheckoutAsync(request, CancellationToken.None);
+        var result = await _sut.CheckoutAsync(request, ct: CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();
         result.Error.Should().Contain(TestDataBuilder.ProductId2);
@@ -219,7 +222,7 @@ public class OrderServiceTests
                 new CheckoutItemDto { ProductId = TestDataBuilder.ProductId1, Quantity = 2 },
                 new CheckoutItemDto { ProductId = TestDataBuilder.ProductId2, Quantity = 5 }
             ]
-        }, CancellationToken.None);
+        }, ct: CancellationToken.None);
 
         await _auditRepo
             .Received(1)
@@ -256,7 +259,7 @@ public class OrderServiceTests
 
         await _sut.CheckoutAsync(
             TestDataBuilder.BuildCheckoutRequest(quantity: 2),
-            CancellationToken.None);
+            ct: CancellationToken.None);
 
         await _auditRepo
             .Received(1)
@@ -299,7 +302,7 @@ public class OrderServiceTests
 
         var result = await _sut.CheckoutAsync(
             TestDataBuilder.BuildCheckoutRequest(quantity: 1),
-            CancellationToken.None);
+            ct: CancellationToken.None);
 
         result.IsSuccess.Should().BeTrue("the order is already persisted; publish failure is best-effort");
 
@@ -321,7 +324,7 @@ public class OrderServiceTests
         var result = await _sut.UpdateAsync(
             "nonexistent-id",
             new UpdateOrderDto { CustomerId = "CUST-001", Items = [], Status = OrderStatus.Processing },
-            CancellationToken.None);
+            ct: CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();
         result.Error.Should().Be("NOT_FOUND");
@@ -344,7 +347,7 @@ public class OrderServiceTests
         var result = await _sut.UpdateAsync(
             TestDataBuilder.OrderId1,
             new UpdateOrderDto { CustomerId = "CUST-001", Items = [], Status = OrderStatus.Processing },
-            CancellationToken.None);
+            ct: CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();
         result.Error.Should().Contain("Shipped");
@@ -372,7 +375,7 @@ public class OrderServiceTests
         var result = await _sut.UpdateAsync(
             TestDataBuilder.OrderId1,
             new UpdateOrderDto { CustomerId = "CUST-001", Items = [], Status = requestedStatus },
-            CancellationToken.None);
+            ct: CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();
         result.Error.Should().Contain(currentStatus).And.Contain(requestedStatus);
@@ -406,7 +409,7 @@ public class OrderServiceTests
         var result = await _sut.UpdateAsync(
             TestDataBuilder.OrderId1,
             new UpdateOrderDto { CustomerId = "CUST-001", Items = [], Status = requestedStatus },
-            CancellationToken.None);
+            ct: CancellationToken.None);
 
         result.IsSuccess.Should().BeTrue();
 
@@ -432,8 +435,83 @@ public class OrderServiceTests
             .GetByIdAsync("nonexistent-id", Arg.Any<CancellationToken>())
             .Returns((Order?)null);
 
-        var result = await _sut.GetByIdAsync("nonexistent-id", CancellationToken.None);
+        var result = await _sut.GetByIdAsync("nonexistent-id", ct: CancellationToken.None);
 
         result.Should().BeNull();
+    }
+
+    // ----------------------------------------------------------------
+    // TEST 13: A duplicate checkout with the same Idempotency-Key returns
+    //          the cached order without touching stock or creating a new order
+    // ----------------------------------------------------------------
+    [Test]
+    public async Task CheckoutAsync_WhenIdempotencyKeyAlreadyUsed_ReturnsCachedOrderWithoutNewDecrement()
+    {
+        const string key          = "idem-key-abc";
+        const string existingId   = TestDataBuilder.OrderId1;
+        var          cachedOrder  = TestDataBuilder.BuildOrder(id: existingId);
+
+        _idempotencyRepo
+            .GetOrderIdAsync(key, Arg.Any<CancellationToken>())
+            .Returns(existingId);
+
+        _orderRepo
+            .GetByIdAsync(existingId, Arg.Any<CancellationToken>())
+            .Returns(cachedOrder);
+
+        var result = await _sut.CheckoutAsync(
+            TestDataBuilder.BuildCheckoutRequest(quantity: 2),
+            idempotencyKey: key,
+            ct: CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value!.Id.Should().Be(existingId);
+
+        // No stock should be touched for a duplicate request
+        await _productRepo
+            .DidNotReceive()
+            .DecrementStockAtomicAsync(
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>());
+
+        await _orderRepo
+            .DidNotReceive()
+            .CreateAsync(Arg.Any<Order>(), Arg.Any<CancellationToken>());
+    }
+
+    // ----------------------------------------------------------------
+    // TEST 14: A fresh checkout with an Idempotency-Key stores the mapping
+    //          after the order is created
+    // ----------------------------------------------------------------
+    [Test]
+    public async Task CheckoutAsync_WhenIdempotencyKeyIsNew_StoresKeyAfterOrderCreation()
+    {
+        const string key     = "idem-key-xyz";
+        var          product = TestDataBuilder.BuildProduct();
+
+        _idempotencyRepo
+            .GetOrderIdAsync(key, Arg.Any<CancellationToken>())
+            .Returns((string?)null);
+
+        _productRepo
+            .DecrementStockAtomicAsync(TestDataBuilder.ProductId1, 1, Arg.Any<CancellationToken>())
+            .Returns(product);
+
+        _orderRepo
+            .CreateAsync(Arg.Any<Order>(), Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                var order = callInfo.Arg<Order>();
+                order.Id = TestDataBuilder.OrderId1;
+                return Task.FromResult(order);
+            });
+
+        await _sut.CheckoutAsync(
+            TestDataBuilder.BuildCheckoutRequest(quantity: 1),
+            idempotencyKey: key,
+            ct: CancellationToken.None);
+
+        await _idempotencyRepo
+            .Received(1)
+            .StoreAsync(key, TestDataBuilder.OrderId1, Arg.Any<CancellationToken>());
     }
 }

@@ -21,6 +21,13 @@ public class ProductRepository : IProductRepository
         return await _collection.Find(filter).FirstOrDefaultAsync(ct);
     }
 
+    public async Task<List<Product>> GetAllAsync(CancellationToken ct = default)
+    {
+        return await _collection.Find(Builders<Product>.Filter.Empty)
+            .SortBy(p => p.Name)
+            .ToListAsync(ct);
+    }
+
     public async Task<Product?> DecrementStockAtomicAsync(string productId, int quantity, CancellationToken ct = default)
     {
         // This single FindOneAndUpdateAsync call is the race-condition guard.

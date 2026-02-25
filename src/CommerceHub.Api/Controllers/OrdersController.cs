@@ -17,8 +17,20 @@ public class OrdersController : ControllerBase
     }
 
     /// <summary>
+    /// Returns all orders. Optionally filter by customerId.
+    /// </summary>
+    [HttpGet]
+    [ProducesResponseType(typeof(List<OrderResponseDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetAll([FromQuery] string? customerId, CancellationToken ct)
+    {
+        var orders = await _orderService.GetAllAsync(customerId, ct);
+        return Ok(orders);
+    }
+
+    /// <summary>
     /// Processes a new order. Verifies stock, atomically decrements inventory,
     /// creates the order, and publishes an OrderCreated event.
+    /// Supports idempotent retries via the Idempotency-Key request header.
     /// </summary>
     [HttpPost("checkout")]
     [ProducesResponseType(typeof(OrderResponseDto), StatusCodes.Status201Created)]
@@ -28,7 +40,8 @@ public class OrdersController : ControllerBase
         [FromBody] CheckoutRequestDto dto,
         CancellationToken ct)
     {
-        var result = await _orderService.CheckoutAsync(dto, ct);
+        var idempotencyKey = Request.Headers["Idempotency-Key"].FirstOrDefault();
+        var result = await _orderService.CheckoutAsync(dto, idempotencyKey, ct);
 
         if (result.IsFailure)
             return UnprocessableEntity(new { message = result.Error });

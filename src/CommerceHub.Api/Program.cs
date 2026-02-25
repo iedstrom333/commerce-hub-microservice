@@ -1,5 +1,7 @@
 using CommerceHub.Api.Configuration;
 using CommerceHub.Api.Extensions;
+using CommerceHub.Api.HealthChecks;
+using CommerceHub.Api.Middleware;
 using Microsoft.Extensions.Options;
 using MongoDB.Driver;
 
@@ -16,6 +18,10 @@ builder.Services.AddMongoDB();
 builder.Services.AddRabbitMq();
 builder.Services.AddApplicationServices();
 
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+builder.Services.AddHealthChecks()
+    .AddCheck<MongoHealthCheck>("mongodb");
+
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
@@ -31,6 +37,9 @@ using (var scope = app.Services.CreateScope())
     var settings = scope.ServiceProvider.GetRequiredService<IOptions<MongoDbSettings>>().Value;
     await db.EnsureIndexesAsync(settings);
 }
+
+app.UseExceptionHandler();
+app.MapHealthChecks("/health");
 
 app.UseSwagger();
 app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Commerce Hub API v1"));

@@ -5,6 +5,7 @@ namespace CommerceHub.Api.Interfaces;
 public interface IProductRepository
 {
     Task<Product?> GetByIdAsync(string id, CancellationToken ct = default);
+    Task<List<Product>> GetAllAsync(CancellationToken ct = default);
 
     /// <summary>
     /// Atomically decrements stock if sufficient quantity is available.

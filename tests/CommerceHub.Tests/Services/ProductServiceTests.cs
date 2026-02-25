@@ -33,7 +33,7 @@ public class ProductServiceTests
     [Test]
     public async Task AdjustStockAsync_WhenDeltaIsZero_ReturnsFailureWithoutCallingRepo()
     {
-        var result = await _sut.AdjustStockAsync(TestDataBuilder.ProductId1, 0, CancellationToken.None);
+        var result = await _sut.AdjustStockAsync(TestDataBuilder.ProductId1, 0, ct: CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();
         result.Error.Should().Contain("zero");
@@ -60,7 +60,7 @@ public class ProductServiceTests
             .GetByIdAsync(TestDataBuilder.ProductId1, Arg.Any<CancellationToken>())
             .Returns(existingProduct);
 
-        var result = await _sut.AdjustStockAsync(TestDataBuilder.ProductId1, -50, CancellationToken.None);
+        var result = await _sut.AdjustStockAsync(TestDataBuilder.ProductId1, -50, ct: CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();
         result.Error.Should().Contain("stock");
@@ -78,7 +78,7 @@ public class ProductServiceTests
             .AdjustStockAtomicAsync(TestDataBuilder.ProductId1, 10, Arg.Any<CancellationToken>())
             .Returns(updatedProduct);
 
-        var result = await _sut.AdjustStockAsync(TestDataBuilder.ProductId1, 10, CancellationToken.None);
+        var result = await _sut.AdjustStockAsync(TestDataBuilder.ProductId1, 10, ct: CancellationToken.None);
 
         result.IsSuccess.Should().BeTrue();
         result.Value!.StockQuantity.Should().Be(110);
@@ -98,7 +98,7 @@ public class ProductServiceTests
             .GetByIdAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns((Product?)null);
 
-        var result = await _sut.AdjustStockAsync("nonexistent-id", -5, CancellationToken.None);
+        var result = await _sut.AdjustStockAsync("nonexistent-id", -5, ct: CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();
         result.Error.Should().Be("NOT_FOUND");
@@ -118,7 +118,7 @@ public class ProductServiceTests
             .AdjustStockAtomicAsync(TestDataBuilder.ProductId1, 10, Arg.Any<CancellationToken>())
             .Returns(updatedProduct);
 
-        await _sut.AdjustStockAsync(TestDataBuilder.ProductId1, 10, CancellationToken.None);
+        await _sut.AdjustStockAsync(TestDataBuilder.ProductId1, 10, ct: CancellationToken.None);
 
         await _auditRepo
             .Received(1)
