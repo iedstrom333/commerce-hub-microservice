@@ -338,6 +338,8 @@ Indexes are created idempotently at startup via `EnsureIndexesAsync`:
 | `AuditLogs` | `entityId asc, timestamp desc` | Audit history queries |
 | `AuditLogs` | `relatedOrderId` (sparse) | Order-scoped audit lookups |
 | `Orders` | `customerId` | `GET /api/orders?customerId=` filter |
+| `Products` | `sku` (unique) | Data integrity — prevents duplicate SKUs |
+| `Products` | `stockQuantity` | Stock-guard filter performance on checkout |
 | `IdempotencyKeys` | `createdAt` (TTL 24h) | Automatic expiry of old keys |
 
 ---

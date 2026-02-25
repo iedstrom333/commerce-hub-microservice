@@ -32,7 +32,7 @@ This produced tests that assert intent, not implementation details.
 
 ---
 
-## Human Audit: Three Specific Corrections
+## Human Audit: Four Specific Corrections
 
 ### Correction 1: RabbitMQ Singleton Registration Pattern
 
@@ -128,7 +128,31 @@ The service layer check was kept as well — it provides a fast-path failure res
 
 ---
 
-## Test Generation for Edge Cases
+### Correction 4: CancellationToken Bug in Fire-and-Forget Audit Writes
+
+**Discovery:** After the audit log system was implemented, I inspected the MongoDB `AuditLogs` collection directly and found it completely empty despite placing orders and adjusting stock. No errors were surfaced in the API responses.
+
+**Root cause identified:** The fire-and-forget audit writes used the HTTP request's `CancellationToken`:
+
+```csharp
+// Buggy — ct is the HTTP request's CancellationToken
+_ = _auditRepo.LogAsync(entry, ct);
+```
+
+ASP.NET Core cancels this token as soon as the HTTP response is sent. Since the fire-and-forget task had not yet started, `InsertOneAsync` received an already-cancelled token, threw `OperationCanceledException`, and the silent try/catch in `LogAsync` discarded it. The collection remained empty.
+
+**Human correction:** Changed all four fire-and-forget `LogAsync` calls to `CancellationToken.None`:
+
+```csharp
+// Fixed — audit write lifecycle is independent of the HTTP request
+_ = _auditRepo.LogAsync(entry, CancellationToken.None);
+```
+
+This was non-obvious because the bug produced no errors — only silent data loss. Discovering it required manually querying the database after placing a test order.
+
+---
+
+## Verification: AI-Assisted Test Generation for Edge Cases
 
 AI was prompted with specific edge case scenarios rather than asked to "generate comprehensive tests":
 
@@ -154,37 +178,11 @@ The `PATCH /api/products/{id}/stock` endpoint accepts a `delta` field. A zero de
 
 ---
 
-### Correction 4: CancellationToken Bug in Fire-and-Forget Audit Writes
+## Additional Features Directed by Human
 
-**Discovery:** After the audit log system was implemented, I inspected the MongoDB `AuditLogs` collection directly and found it completely empty despite placing orders and adjusting stock. No errors were surfaced in the API responses.
+The following features were built by the AI at explicit human direction.
 
-**Root cause identified:** The fire-and-forget audit writes used the HTTP request's `CancellationToken`:
-
-```csharp
-// Buggy — ct is the HTTP request's CancellationToken
-_ = _auditRepo.LogAsync(entry, ct);
-```
-
-ASP.NET Core cancels this token as soon as the HTTP response is sent. Since the fire-and-forget task had not yet started, `InsertOneAsync` received an already-cancelled token, threw `OperationCanceledException`, and the silent try/catch in `LogAsync` discarded it. The collection remained empty.
-
-**Human correction:** Changed all four fire-and-forget `LogAsync` calls to `CancellationToken.None`:
-
-```csharp
-// Fixed — audit write lifecycle is independent of the HTTP request
-_ = _auditRepo.LogAsync(entry, CancellationToken.None);
-```
-
-This was non-obvious because the bug produced no errors — only silent data loss. Discovering it required manually querying the database after placing a test order.
-
----
-
----
-
-## User-Directed AI Features
-
-The following features were built by the AI at explicit human direction. Each item describes what was requested, what the AI produced, and why it was needed.
-
-### Feature 1: System Diagrams
+### System Diagrams
 
 **Requested:** Generate all architectural and process diagrams for the system.
 
@@ -194,11 +192,9 @@ The following features were built by the AI at explicit human direction. Each it
 - **ERD** — MongoDB collection schemas for `Orders`, `Products`, `AuditLogs`, and `IdempotencyKeys` with field types and index annotations
 - **Use-case diagrams** — four actor perspectives (Customer, Warehouse Manager, Fulfillment Staff, Downstream Service) mapping each actor to the endpoints they interact with
 
-**Why it was needed:** The diagrams provide a visual reference for the system architecture that is faster to read than code during code review, and serve as documentation for anyone onboarding to the project.
-
 ---
 
-### Feature 2: RabbitMQ Queue Pre-Configuration
+### RabbitMQ Queue Pre-Configuration
 
 **Requested:** Add configuration so the `order.created` queue and binding exist before any message is published, enabling the RabbitMQ Management UI to show queued messages for inspection.
 
@@ -211,11 +207,11 @@ The following features were built by the AI at explicit human direction. Each it
 
 ---
 
-### Feature 3: Integration Tests
+### Integration Tests
 
 **Requested:** Generate integration tests using Testcontainers to spin up real MongoDB and RabbitMQ instances in Docker, testing the full stack from HTTP request to database state.
 
-**AI produced:** An `IntegrationTests` project (`tests/CommerceHub.IntegrationTests/`) covering:
+**AI produced:** An integration test suite (`tests/CommerceHub.Tests/Integration/`) covering:
 - Full checkout happy path: POST → 201, verify order in MongoDB, verify stock decremented
 - Idempotency: same `Idempotency-Key` header on two POST requests returns the same order ID both times
 - Insufficient stock: POST with quantity exceeding stock → 422, verify no order created, verify stock unchanged
@@ -227,7 +223,21 @@ Tests use `WebApplicationFactory<Program>` with Testcontainers-managed container
 
 ---
 
-### Feature 5: Performance and Security Hardening
+### Manual Testing Guide
+
+**Requested:** Generate a comprehensive manual testing guide with exact curl commands covering all happy paths and edge cases for every endpoint.
+
+**AI produced:** `manualTesting.txt` covering all four system actors:
+- Customer: happy path order, zero/negative quantity rejection, insufficient stock, mid-checkout rollback verification
+- Warehouse: restock, manual decrement, zero delta, negative-beyond-stock, product not found
+- Fulfillment: state machine transitions (Pending → Processing → Shipped), terminal-state lock (409)
+- Downstream: RabbitMQ Management UI inspection of queued `OrderCreatedEvent` payloads
+
+The guide also documents the reset procedure (`docker-compose down -v && docker-compose up --build`) needed to restore seed stock levels between test sessions.
+
+---
+
+### Performance and Security Hardening
 
 **Requested:** Identify and implement quick performance and security improvements. Four items were selected from a ranked list and implemented:
 
@@ -245,21 +255,7 @@ Tests use `WebApplicationFactory<Program>` with Testcontainers-managed container
 
 **4. Products indexes declared at startup**
 
-`sku_unique` (unique sparse index) and `stockQuantity` (ascending index) for the `Products` collection were added to `EnsureIndexesAsync` in `MongoIndexExtensions.cs`. Previously these indexes were only created by the seed script, meaning a fresh container with a different seed path would run the stock-guard `FindOneAndUpdateAsync` filter against an unindexed `stockQuantity` field — a full collection scan on every checkout item. Declaring them at startup guarantees they exist regardless of how the database was populated.
-
----
-
-### Feature 4: Manual Testing Guide
-
-**Requested:** Generate a comprehensive manual testing guide with exact curl commands covering all happy paths and edge cases for every endpoint.
-
-**AI produced:** `manualTesting.txt` covering all four system actors:
-- Customer: happy path order, zero/negative quantity rejection, insufficient stock, mid-checkout rollback verification
-- Warehouse: restock, manual decrement, zero delta, negative-beyond-stock, product not found
-- Fulfillment: state machine transitions (Pending → Processing → Shipped), terminal-state lock (409)
-- Downstream: RabbitMQ Management UI inspection of queued `OrderCreatedEvent` payloads
-
-The guide also documents the reset procedure (`docker-compose down -v && docker-compose up --build`) needed to restore seed stock levels between test sessions.
+`sku_unique` (unique index) and `stockQuantity` (ascending index) for the `Products` collection were added to `EnsureIndexesAsync` in `MongoIndexExtensions.cs`. Previously these indexes were only created by the seed script, meaning a fresh container with a different seed path would run the stock-guard `FindOneAndUpdateAsync` filter against an unindexed `stockQuantity` field — a full collection scan on every checkout item. Declaring them at startup guarantees they exist regardless of how the database was populated.
 
 ---
 
