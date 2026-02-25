@@ -1,5 +1,7 @@
 using CommerceHub.Api.Configuration;
 using CommerceHub.Api.Extensions;
+using Microsoft.Extensions.Options;
+using MongoDB.Driver;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,6 +24,13 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 var app = builder.Build();
+
+using (var scope = app.Services.CreateScope())
+{
+    var db       = scope.ServiceProvider.GetRequiredService<IMongoDatabase>();
+    var settings = scope.ServiceProvider.GetRequiredService<IOptions<MongoDbSettings>>().Value;
+    await db.EnsureIndexesAsync(settings);
+}
 
 app.UseSwagger();
 app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Commerce Hub API v1"));

@@ -13,13 +13,18 @@ namespace CommerceHub.Tests.Services;
 public class ProductServiceTests
 {
     private IProductRepository _productRepo = null!;
-    private ProductService _sut = null!;
+    private IAuditRepository   _auditRepo   = null!;
+    private ProductService     _sut         = null!;
 
     [SetUp]
     public void SetUp()
     {
         _productRepo = Substitute.For<IProductRepository>();
-        _sut = new ProductService(_productRepo, Substitute.For<ILogger<ProductService>>());
+        _auditRepo   = Substitute.For<IAuditRepository>();
+        _sut = new ProductService(
+            _productRepo,
+            _auditRepo,
+            Substitute.For<ILogger<ProductService>>());
     }
 
     // ----------------------------------------------------------------
@@ -36,9 +41,7 @@ public class ProductServiceTests
         await _productRepo
             .DidNotReceive()
             .AdjustStockAtomicAsync(
-                Arg.Any<string>(),
-                Arg.Any<int>(),
-                Arg.Any<CancellationToken>());
+                Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>());
     }
 
     // ----------------------------------------------------------------
@@ -49,12 +52,10 @@ public class ProductServiceTests
     {
         var existingProduct = TestDataBuilder.BuildProduct(stockQuantity: 10);
 
-        // Atomic operation returns null = constraint violated (negative stock would result)
         _productRepo
             .AdjustStockAtomicAsync(TestDataBuilder.ProductId1, -50, Arg.Any<CancellationToken>())
             .Returns((Product?)null);
 
-        // Secondary read to distinguish "not found" from "constraint violated"
         _productRepo
             .GetByIdAsync(TestDataBuilder.ProductId1, Arg.Any<CancellationToken>())
             .Returns(existingProduct);
@@ -101,5 +102,34 @@ public class ProductServiceTests
 
         result.IsFailure.Should().BeTrue();
         result.Error.Should().Be("NOT_FOUND");
+    }
+
+    // ----------------------------------------------------------------
+    // TEST 5: Successful adjustment writes a StockAdjusted audit entry
+    //         with correct before/after stock values
+    // ----------------------------------------------------------------
+    [Test]
+    public async Task AdjustStockAsync_WhenSuccessful_LogsStockAdjustedAuditWithCorrectFields()
+    {
+        // stockAfter = 110, delta = 10, so stockBefore = 100
+        var updatedProduct = TestDataBuilder.BuildProduct(stockQuantity: 110);
+
+        _productRepo
+            .AdjustStockAtomicAsync(TestDataBuilder.ProductId1, 10, Arg.Any<CancellationToken>())
+            .Returns(updatedProduct);
+
+        await _sut.AdjustStockAsync(TestDataBuilder.ProductId1, 10, CancellationToken.None);
+
+        await _auditRepo
+            .Received(1)
+            .LogAsync(
+                Arg.Is<AuditLog>(l =>
+                    l.Event       == "StockAdjusted"           &&
+                    l.Actor       == "Warehouse"               &&
+                    l.EntityId    == TestDataBuilder.ProductId1 &&
+                    l.Delta       == 10                        &&
+                    l.StockBefore == 100                       &&
+                    l.StockAfter  == 110),
+                Arg.Any<CancellationToken>());
     }
 }

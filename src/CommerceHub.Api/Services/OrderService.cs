@@ -10,9 +10,18 @@ namespace CommerceHub.Api.Services;
 
 public class OrderService : IOrderService
 {
+    private static readonly Dictionary<string, HashSet<string>> ValidTransitions = new()
+    {
+        [OrderStatus.Pending]    = [OrderStatus.Processing, OrderStatus.Cancelled],
+        [OrderStatus.Processing] = [OrderStatus.Shipped,    OrderStatus.Cancelled],
+        [OrderStatus.Shipped]    = [],
+        [OrderStatus.Cancelled]  = [],
+    };
+
     private readonly IOrderRepository _orderRepo;
     private readonly IProductRepository _productRepo;
     private readonly IEventPublisher _publisher;
+    private readonly IAuditRepository _auditRepo;
     private readonly RabbitMqSettings _mqSettings;
     private readonly ILogger<OrderService> _logger;
 
@@ -21,12 +30,14 @@ public class OrderService : IOrderService
         IProductRepository productRepo,
         IEventPublisher publisher,
         IOptions<RabbitMqSettings> mqSettings,
+        IAuditRepository auditRepo,
         ILogger<OrderService> logger)
     {
         _orderRepo = orderRepo;
         _productRepo = productRepo;
         _publisher = publisher;
         _mqSettings = mqSettings.Value;
+        _auditRepo = auditRepo;
         _logger = logger;
     }
 
@@ -40,7 +51,8 @@ public class OrderService : IOrderService
             return Result<OrderResponseDto>.Fail($"Quantity must be at least 1 for product '{invalidItem.ProductId}'.");
 
         // Track which items were successfully decremented so we can roll back on failure.
-        var decremented = new List<(string ProductId, int Quantity)>();
+        // StockAfter is the post-decrement stock returned by the atomic operation.
+        var decremented = new List<(string ProductId, int Quantity, int StockAfter)>();
 
         try
         {
@@ -60,7 +72,7 @@ public class OrderService : IOrderService
                         $"Insufficient stock or product not found: '{item.ProductId}'.");
                 }
 
-                decremented.Add((item.ProductId, item.Quantity));
+                decremented.Add((item.ProductId, item.Quantity, product.StockQuantity));
                 orderItems.Add(new OrderItem
                 {
                     ProductId = product.Id!,
@@ -82,6 +94,23 @@ public class OrderService : IOrderService
             };
 
             var created = await _orderRepo.CreateAsync(order, ct);
+
+            // Write audit entries for each successfully decremented product now that we have the order ID.
+            foreach (var (productId, qty, stockAfter) in decremented)
+            {
+                _ = _auditRepo.LogAsync(new AuditLog
+                {
+                    Timestamp = DateTime.UtcNow,
+                    Event = "StockDecremented",
+                    Actor = "Checkout",
+                    EntityType = "Product",
+                    EntityId = productId,
+                    Delta = -qty,
+                    StockBefore = stockAfter + qty,
+                    StockAfter = stockAfter,
+                    RelatedOrderId = created.Id
+                }, CancellationToken.None);
+            }
 
             // Event publication is best-effort. The order is already committed to MongoDB,
             // so we do NOT roll back stock if publishing fails. In production, an outbox
@@ -133,8 +162,11 @@ public class OrderService : IOrderService
         if (existing is null)
             return Result<OrderResponseDto>.Fail("NOT_FOUND");
 
-        if (existing.Status == OrderStatus.Shipped)
-            return Result<OrderResponseDto>.Fail("Order cannot be modified once it has been Shipped.");
+        if (!ValidTransitions.TryGetValue(existing.Status, out var allowed) || !allowed.Contains(dto.Status))
+            return Result<OrderResponseDto>.Fail(
+                $"Cannot transition order from '{existing.Status}' to '{dto.Status}'.");
+
+        var oldStatus = existing.Status.ToString();
 
         var updated = new Order
         {
@@ -160,17 +192,38 @@ public class OrderService : IOrderService
         if (saved is null)
             return Result<OrderResponseDto>.Fail("NOT_FOUND");
 
+        _ = _auditRepo.LogAsync(new AuditLog
+        {
+            Timestamp = DateTime.UtcNow,
+            Event = "OrderStatusChanged",
+            Actor = "Fulfillment",
+            EntityType = "Order",
+            EntityId = id,
+            OldStatus = oldStatus,
+            NewStatus = dto.Status.ToString()
+        }, CancellationToken.None);
+
         return Result<OrderResponseDto>.Ok(MapToDto(saved));
     }
 
-    private async Task RollbackStockAsync(IEnumerable<(string ProductId, int Quantity)> items, CancellationToken ct)
+    private async Task RollbackStockAsync(IEnumerable<(string ProductId, int Quantity, int StockAfter)> items, CancellationToken ct, string? orderId = null)
     {
-        foreach (var (productId, qty) in items)
+        foreach (var (productId, qty, _) in items)
         {
             try
             {
                 await _productRepo.IncrementStockAsync(productId, qty, ct);
                 _logger.LogInformation("Rolled back {Quantity} units for product {ProductId}.", qty, productId);
+                _ = _auditRepo.LogAsync(new AuditLog
+                {
+                    Timestamp = DateTime.UtcNow,
+                    Event = "StockRolledBack",
+                    Actor = "Checkout",
+                    EntityType = "Product",
+                    EntityId = productId,
+                    Delta = qty,
+                    RelatedOrderId = orderId
+                }, CancellationToken.None);
             }
             catch (Exception ex)
             {
