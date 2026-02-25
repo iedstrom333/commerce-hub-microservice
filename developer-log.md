@@ -227,6 +227,28 @@ Tests use `WebApplicationFactory<Program>` with Testcontainers-managed container
 
 ---
 
+### Feature 5: Performance and Security Hardening
+
+**Requested:** Identify and implement quick performance and security improvements. Four items were selected from a ranked list and implemented:
+
+**1. Swagger gated to Development environment**
+
+`app.UseSwagger()` and `app.UseSwaggerUI()` were moved inside `if (app.Environment.IsDevelopment())`. Previously, Swagger was unconditionally registered, exposing the full API schema and a browsable UI in production. Gating it to Development eliminates that surface without any runtime cost.
+
+**2. `[MaxLength]` DataAnnotations on all DTO string fields**
+
+`[MaxLength(50)]` was added to `CustomerId` in `CheckoutRequestDto` and `UpdateOrderDto`. `[MaxLength(24, ErrorMessage = "ProductId must be a 24-character ObjectId.")]` was added to `ProductId` in `CheckoutItemDto`. Without these, the model binder would accept arbitrarily long strings before any business logic ran — a low-effort input-size abuse vector. The 24-character limit on `ProductId` also documents the MongoDB ObjectId format constraint directly in the DTO.
+
+**3. Response compression**
+
+`AddResponseCompression(opts => opts.EnableForHttps = true)` was registered in the service collection and `app.UseResponseCompression()` was added to the middleware pipeline. JSON payloads (product lists, order bodies) compress well; this reduces bandwidth for list responses with no application-layer changes.
+
+**4. Products indexes declared at startup**
+
+`sku_unique` (unique sparse index) and `stockQuantity` (ascending index) for the `Products` collection were added to `EnsureIndexesAsync` in `MongoIndexExtensions.cs`. Previously these indexes were only created by the seed script, meaning a fresh container with a different seed path would run the stock-guard `FindOneAndUpdateAsync` filter against an unindexed `stockQuantity` field — a full collection scan on every checkout item. Declaring them at startup guarantees they exist regardless of how the database was populated.
+
+---
+
 ### Feature 4: Manual Testing Guide
 
 **Requested:** Generate a comprehensive manual testing guide with exact curl commands covering all happy paths and edge cases for every endpoint.
