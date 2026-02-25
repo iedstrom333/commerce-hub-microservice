@@ -178,10 +178,60 @@ This was non-obvious because the bug produced no errors — only silent data los
 
 ---
 
-### Contribution: Manual Testing Guide (`manualTesting.txt`)
+---
 
-I wrote a comprehensive manual testing guide covering all four system actors (Customer, Warehouse Manager, Fulfillment Staff, Downstream Service) with exact curl commands for every happy path and edge case. The guide covers:
+## User-Directed AI Features
 
+The following features were built by the AI at explicit human direction. Each item describes what was requested, what the AI produced, and why it was needed.
+
+### Feature 1: System Diagrams
+
+**Requested:** Generate all architectural and process diagrams for the system.
+
+**AI produced:**
+- **Sequence diagrams** — end-to-end request flows for checkout, stock adjustment, and order status update, showing actor → controller → service → repository → MongoDB/RabbitMQ interactions at each step
+- **UML class diagram** — full system structure showing all models, interfaces, repositories, services, and controllers with their relationships and cardinalities
+- **ERD** — MongoDB collection schemas for `Orders`, `Products`, `AuditLogs`, and `IdempotencyKeys` with field types and index annotations
+- **Use-case diagrams** — four actor perspectives (Customer, Warehouse Manager, Fulfillment Staff, Downstream Service) mapping each actor to the endpoints they interact with
+
+**Why it was needed:** The diagrams provide a visual reference for the system architecture that is faster to read than code during code review, and serve as documentation for anyone onboarding to the project.
+
+---
+
+### Feature 2: RabbitMQ Queue Pre-Configuration
+
+**Requested:** Add configuration so the `order.created` queue and binding exist before any message is published, enabling the RabbitMQ Management UI to show queued messages for inspection.
+
+**AI produced:** A `rabbitmq-definitions.json` file mounted into the RabbitMQ container via `docker-compose.yml`. The file pre-declares:
+- A `topic` exchange named `commerce_hub`
+- A durable queue named `order.created`
+- A binding from the exchange to the queue using routing key `order.created`
+
+**Why it was needed:** Without the queue declared in advance, RabbitMQ would discard any message published to the exchange before a consumer connected and declared the queue. Pre-configuring via definitions ensures messages are retained and visible in the Management UI at `http://localhost:15672` immediately after checkout, without requiring a running consumer.
+
+---
+
+### Feature 3: Integration Tests
+
+**Requested:** Generate integration tests using Testcontainers to spin up real MongoDB and RabbitMQ instances in Docker, testing the full stack from HTTP request to database state.
+
+**AI produced:** An `IntegrationTests` project (`tests/CommerceHub.IntegrationTests/`) covering:
+- Full checkout happy path: POST → 201, verify order in MongoDB, verify stock decremented
+- Idempotency: same `Idempotency-Key` header on two POST requests returns the same order ID both times
+- Insufficient stock: POST with quantity exceeding stock → 422, verify no order created, verify stock unchanged
+- Stock adjustment happy path: PATCH → 200, verify new stock level in MongoDB
+- Order status update: PUT → 200, verify status change in MongoDB
+- Shipped guard: PUT on a Shipped order → 409 conflict
+
+Tests use `WebApplicationFactory<Program>` with Testcontainers-managed containers, ensuring no mocking of infrastructure — every assertion is against real MongoDB documents.
+
+---
+
+### Feature 4: Manual Testing Guide
+
+**Requested:** Generate a comprehensive manual testing guide with exact curl commands covering all happy paths and edge cases for every endpoint.
+
+**AI produced:** `manualTesting.txt` covering all four system actors:
 - Customer: happy path order, zero/negative quantity rejection, insufficient stock, mid-checkout rollback verification
 - Warehouse: restock, manual decrement, zero delta, negative-beyond-stock, product not found
 - Fulfillment: state machine transitions (Pending → Processing → Shipped), terminal-state lock (409)
