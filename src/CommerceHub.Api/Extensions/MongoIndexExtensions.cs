@@ -26,8 +26,7 @@ public static class MongoIndexExtensions
         var orders = database.GetCollection<Order>(settings.OrdersCollection);
         await orders.Indexes.CreateOneAsync(
             new CreateIndexModel<Order>(
-                Builders<Order>.IndexKeys.Ascending(x => x.CustomerId),
-                new CreateIndexOptions { Name = "customerId" }));
+                Builders<Order>.IndexKeys.Ascending(x => x.CustomerId)));
 
         // Products: sku unique (data integrity) + stockQuantity (stock-guard filter performance)
         var products = database.GetCollection<Product>(settings.ProductsCollection);
