@@ -220,36 +220,64 @@ Product 3 has intentionally low stock to test the insufficient-stock path.
 
 ## Running Tests
 
-The project targets .NET 8. If you don't have the SDK installed locally, run via Docker:
+### Unit tests (no Docker socket needed)
 
 ```bash
 docker run --rm \
   -v "$(pwd):/app" \
   -w /app \
   mcr.microsoft.com/dotnet/sdk:8.0 \
-  dotnet test tests/CommerceHub.Tests/
-```
-
-Or with a local .NET 8 SDK:
-
-```bash
-dotnet test tests/CommerceHub.Tests/
+  dotnet test tests/CommerceHub.Tests/ --filter "Category!=Integration"
 ```
 
 **Expected: 25 tests, 25 passed, 0 failed**
 
+### Integration tests (requires Docker socket)
+
+Integration tests spin up real MongoDB and RabbitMQ containers via [Testcontainers](https://dotnet.testcontainers.org/) and run the full API through `WebApplicationFactory`.
+
+```bash
+docker run --rm \
+  -v "$(pwd):/app" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e TESTCONTAINERS_RYUK_DISABLED=true \
+  -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
+  -w /app \
+  mcr.microsoft.com/dotnet/sdk:8.0 \
+  dotnet test tests/CommerceHub.Tests/ --filter "Category=Integration"
+```
+
+**Expected: 18 tests, 18 passed, 0 failed**
+
+Or run everything at once (requires Docker socket):
+
+```bash
+docker run --rm \
+  -v "$(pwd):/app" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e TESTCONTAINERS_RYUK_DISABLED=true \
+  -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
+  -w /app \
+  mcr.microsoft.com/dotnet/sdk:8.0 \
+  dotnet test tests/CommerceHub.Tests/
+```
+
+**Expected: 43 tests, 43 passed, 0 failed**
+
 ### Test Coverage
 
-| Suite | Tests |
-|-------|-------|
-| **Checkout — happy path** | Exact quantity decrement, event published, `StockDecremented` audit written with correct fields |
-| **Checkout — failure** | Mid-checkout rollback, `StockRolledBack` audit written, order never created |
-| **Checkout — resilience** | RabbitMQ publish failure does not roll back a committed order |
-| **Checkout — idempotency** | Duplicate key returns cached order without touching stock; new key stores mapping |
-| **Order update — state machine** | 4 valid transitions confirmed; 4 invalid transitions blocked with descriptive error |
-| **Order update — audit** | `OrderStatusChanged` entry written with correct old/new status |
-| **Order update — guards** | NOT_FOUND and terminal-state cases handled |
-| **Stock adjustment** | Zero delta, negative exceeding stock, product not found, success with `StockAdjusted` audit |
+| Suite | Type | Tests |
+|-------|------|-------|
+| **Checkout — happy path** | Unit | Exact quantity decrement, event published, `StockDecremented` audit written with correct fields |
+| **Checkout — failure** | Unit | Mid-checkout rollback, `StockRolledBack` audit written, order never created |
+| **Checkout — resilience** | Unit | RabbitMQ publish failure does not roll back a committed order |
+| **Checkout — idempotency** | Unit | Duplicate key returns cached order without touching stock; new key stores mapping |
+| **Order update — state machine** | Unit | 4 valid transitions confirmed; 4 invalid transitions blocked with descriptive error |
+| **Order update — audit** | Unit | `OrderStatusChanged` entry written with correct old/new status |
+| **Order update — guards** | Unit | NOT_FOUND and terminal-state cases handled |
+| **Stock adjustment** | Unit | Zero delta, negative exceeding stock, product not found, success with `StockAdjusted` audit |
+| **Orders — HTTP + MongoDB** | Integration | Checkout 201, stock decrement verified in DB, `StockDecremented` audit polled from DB, insufficient-stock 422, idempotent replay, GET / GET by ID / PUT transitions / 409 conflict / customer filter |
+| **Products — HTTP + MongoDB** | Integration | GET all, positive delta + DB verify, `StockAdjusted` audit polled from DB, zero delta 422, negative-exceeds-stock 422, not-found 404, health check |
 
 ---
 
@@ -335,6 +363,8 @@ Indexes are created idempotently at startup via `EnsureIndexesAsync`:
 │   └── Middleware/        GlobalExceptionHandler
 ├── tests/CommerceHub.Tests/
 │   ├── Services/          OrderServiceTests (14 tests), ProductServiceTests (5 tests)
+│   ├── Integration/       GlobalTestSetup, IntegrationTestBase,
+│   │                      OrdersIntegrationTests (11 tests), ProductsIntegrationTests (7 tests)
 │   └── Helpers/           TestDataBuilder
 ├── mongo-seed/            seed.js with 3 test products
 ├── docker-compose.yml

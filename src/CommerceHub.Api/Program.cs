@@ -19,6 +19,7 @@ builder.Services.AddRabbitMq();
 builder.Services.AddApplicationServices();
 
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+builder.Services.AddProblemDetails();
 builder.Services.AddHealthChecks()
     .AddCheck<MongoHealthCheck>("mongodb");
 
