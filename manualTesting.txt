@@ -1,0 +1,138 @@
+⏺ Here's how to test every use case manually.
+
+  ---
+  Setup
+
+  First, start the stack:
+
+  docker-compose up --build
+
+  Then open Swagger UI at http://localhost:8080/swagger — you can run all requests from there, or use the curl commands below.
+
+  ---
+  Actor 1 — Customer
+
+  Place an order (happy path)
+
+  curl -X POST http://localhost:8080/api/orders/checkout \
+    -H "Content-Type: application/json" \
+    -d '{
+      "customerId": "CUST-001",
+      "items": [
+        { "productId": "000000000000000000000001", "quantity": 2 },
+        { "productId": "000000000000000000000002", "quantity": 1 }
+      ]
+    }'
+  Expect 201. Copy the id from the response for the next calls.
+
+  View order details
+
+  curl http://localhost:8080/api/orders/{id}
+  Expect 200.
+
+  Order rejected — zero/negative quantity (422)
+
+  curl -X POST http://localhost:8080/api/orders/checkout \
+    -H "Content-Type: application/json" \
+    -d '{ "customerId": "CUST-001", "items": [{ "productId": "000000000000000000000001", "quantity": 0 }] }'
+
+  Order rejected — insufficient stock (422)
+
+  Product 3 only has 5 units. Request more:
+  curl -X POST http://localhost:8080/api/orders/checkout \
+    -H "Content-Type: application/json" \
+    -d '{ "customerId": "CUST-001", "items": [{ "productId": "000000000000000000000003", "quantity": 99 }] }'
+
+  Mid-checkout rollback
+
+  Order two items where the second fails — the first item's stock should be automatically restored:
+  curl -X POST http://localhost:8080/api/orders/checkout \
+    -H "Content-Type: application/json" \
+    -d '{
+      "customerId": "CUST-001",
+      "items": [
+        { "productId": "000000000000000000000001", "quantity": 1 },
+        { "productId": "000000000000000000000003", "quantity": 99 }
+      ]
+    }'
+  Expect 422. Check that product 1's stock is unchanged.
+
+  ---
+  Actor 2 — Warehouse Manager
+
+  Restock (positive delta)
+
+  curl -X PATCH http://localhost:8080/api/products/000000000000000000000003/stock \
+    -H "Content-Type: application/json" \
+    -d '{ "delta": 50 }'
+
+  Manual decrement (negative delta)
+
+  curl -X PATCH http://localhost:8080/api/products/000000000000000000000001/stock \
+    -H "Content-Type: application/json" \
+    -d '{ "delta": -5 }'
+
+  Rejected — delta is zero (422)
+
+  curl -X PATCH http://localhost:8080/api/products/000000000000000000000001/stock \
+    -H "Content-Type: application/json" \
+    -d '{ "delta": 0 }'
+
+  Rejected — would go below zero (422)
+
+  curl -X PATCH http://localhost:8080/api/products/000000000000000000000002/stock \
+    -H "Content-Type: application/json" \
+    -d '{ "delta": -9999 }'
+
+  Product not found (404)
+
+  curl -X PATCH http://localhost:8080/api/products/000000000000000000000099/stock \
+    -H "Content-Type: application/json" \
+    -d '{ "delta": 10 }'
+
+  ---
+  Actor 3 — Fulfillment Staff
+
+  Using the order id from step 1:
+
+  Advance to Processing
+
+  curl -X PUT http://localhost:8080/api/orders/{id} \
+    -H "Content-Type: application/json" \
+    -d '{
+      "customerId": "CUST-001",
+      "status": "Processing",
+      "items": [{ "productId": "000000000000000000000001", "quantity": 2 }]
+    }'
+
+  Advance to Shipped
+
+  curl -X PUT http://localhost:8080/api/orders/{id} \
+    -H "Content-Type: application/json" \
+    -d '{
+      "customerId": "CUST-001",
+      "status": "Shipped",
+      "items": [{ "productId": "000000000000000000000001", "quantity": 2 }]
+    }'
+
+  Try to modify a Shipped order — blocked (409)
+
+  curl -X PUT http://localhost:8080/api/orders/{id} \
+    -H "Content-Type: application/json" \
+    -d '{
+      "customerId": "CUST-001",
+      "status": "Processing",
+      "items": [{ "productId": "000000000000000000000001", "quantity": 2 }]
+    }'
+
+  ---
+  Actor 4 — Downstream Service (RabbitMQ)
+
+  1. Open http://localhost:15672 (login: guest / guest)
+  2. Go to Queues — after placing an order you should see a message queued on the topic exchange
+  3. Or go to Exchanges, find the exchange named in RabbitMqSettings, and use Get Messages to inspect the OrderCreatedEvent payload (contains orderId, customerId, totalAmount, createdAt, items[])
+
+  ---
+  The seed products (000000000000000000000001–3) are always available after a fresh docker-compose up. If you want to reset state mid-session, bring the stack down and up again:
+
+  docker-compose down -v && docker-compose up --build
