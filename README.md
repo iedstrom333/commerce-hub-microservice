@@ -9,7 +9,7 @@ A production-style backend microservice built with **.NET 8**, **MongoDB**, and 
 | Runtime | .NET 8 / ASP.NET Core |
 | Database | MongoDB 7 (atomic `FindOneAndUpdateAsync`) |
 | Messaging | RabbitMQ 3.13 (durable topic exchange) |
-| Testing | NUnit 3 + NSubstitute + FluentAssertions |
+| Testing | NUnit 3 + NSubstitute + FluentAssertions + Testcontainers |
 | Containers | Docker Compose |
 
 ---
@@ -110,8 +110,7 @@ curl -X POST http://localhost:8080/api/orders/checkout \
 ```
 
 **Responses:**
-- `201 Created` — order created, body contains the order object
-- `200 OK` — idempotent replay; returns the previously created order
+- `201 Created` — order created (or idempotent replay of a previous order with the same key)
 - `422 Unprocessable Entity` — insufficient stock or invalid quantity
 - `400 Bad Request` — missing required fields
 
