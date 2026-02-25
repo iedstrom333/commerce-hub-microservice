@@ -32,99 +32,49 @@ This produced tests that assert intent, not implementation details.
 
 ---
 
-## Human Audit: Four Specific Corrections
+## Human Audit: Corrections and Refinements
 
-### Correction 1: RabbitMQ Singleton Registration Pattern
+### Correction 1: Swagger Exposed in All Environments
 
-**AI's initial output:** The AI suggested registering `RabbitMqEventPublisher` as a scoped service and creating a new connection per request:
+**Problem identified:** After reviewing `Program.cs`, I noticed Swagger was registered unconditionally — it would serve the full API schema and an interactive UI in any environment, including production. This is an unnecessary attack surface.
 
-```csharp
-// AI's initial suggestion (incorrect)
-services.AddScoped<IEventPublisher, RabbitMqEventPublisher>();
-```
-
-**Problem identified:** Creating a new TCP connection to RabbitMQ for every HTTP request would cause connection pool exhaustion under load and dramatically slow response times. RabbitMQ connections are expensive (~100ms to establish) and meant to be long-lived.
-
-**Human correction:** Changed to a singleton registered via async factory that blocks synchronously only once at startup:
+**Directed fix:** Wrapped the Swagger middleware in an environment guard. The AI implemented:
 
 ```csharp
-// Corrected implementation
-services.AddSingleton<IEventPublisher>(sp =>
+if (app.Environment.IsDevelopment())
 {
-    var settings = sp.GetRequiredService<IOptions<RabbitMqSettings>>().Value;
-    var logger = sp.GetRequiredService<ILogger<RabbitMqEventPublisher>>();
-    return RabbitMqEventPublisher.CreateAsync(settings, logger)
-        .GetAwaiter().GetResult();
-});
-```
-
-The async factory pattern was required because `IChannel.CreateChannelAsync()` in RabbitMQ.Client v7 is asynchronous and cannot be called in a constructor. The `GetAwaiter().GetResult()` blocking call is acceptable here because it occurs exactly once during application startup, not during request handling.
-
----
-
-### Correction 2: Checkout Rollback Not Implemented
-
-**AI's initial output:** The AI generated a checkout flow that checked all stock levels first (read-only), then decremented:
-
-```csharp
-// AI's initial suggestion (TOCTOU race condition)
-foreach (var item in dto.Items)
-{
-    var product = await _productRepo.GetByIdAsync(item.ProductId, ct);
-    if (product.StockQuantity < item.Quantity)
-        return Result.Fail("Insufficient stock");
+    app.UseSwagger();
+    app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Commerce Hub API v1"));
 }
-// Then decrement each item (not atomic — another request could win between check and update)
-foreach (var item in dto.Items)
-    await _productRepo.DecrementStockAsync(item.ProductId, item.Quantity, ct);
 ```
-
-**Problem identified:** This is a classic check-then-act race condition (TOCTOU — Time of Check, Time of Use). Between the stock check and the decrement, another concurrent request could successfully claim the same inventory, causing stock to go negative.
-
-**Human correction:** Two changes were enforced:
-
-1. Replaced the two-step read+write with a single atomic `FindOneAndUpdateAsync` using a compound filter:
-
-```csharp
-// Filter combines existence check AND stock guard in one atomic DB round-trip
-var filter = Filter.And(
-    Filter.Eq(p => p.Id, productId),
-    Filter.Gte(p => p.StockQuantity, quantity)  // Gte = "greater than or equal"
-);
-var update = Update.Inc(p => p.StockQuantity, -quantity);
-return await _collection.FindOneAndUpdateAsync(filter, update, options, ct);
-```
-
-2. Added compensating rollback: if any item in the checkout fails after others have been decremented, all decremented items are re-incremented via `IncrementStockAsync`.
 
 ---
 
-### Correction 3: PUT Shipped Guard — Service vs. Repository Enforcement
+### Correction 2: DTO String Fields Had No Length Limits
 
-**AI's initial output:** The Shipped guard was only checked in `OrderService.UpdateAsync` before calling the repository:
+**Problem identified:** Reviewing the DTOs, `CustomerId` and `ProductId` accepted strings of unlimited length. Without bounds, the model binder would pass arbitrarily long input all the way through to MongoDB before any rejection could occur.
+
+**Directed fix:** Added `[MaxLength]` annotations. The AI implemented `[MaxLength(50)]` on `CustomerId` in both checkout and update DTOs, and `[MaxLength(24)]` on `ProductId` with an error message documenting the MongoDB ObjectId format constraint.
+
+---
+
+### Correction 3: Products Indexes Not Declared at Startup
+
+**Problem identified:** Inspecting `MongoIndexExtensions.cs`, I found that the Products collection had no indexes registered at startup. The `sku` uniqueness constraint and the `stockQuantity` index used by the stock-guard filter were only created by the seed script — a fragile dependency.
+
+**Directed fix:** Added both indexes to `EnsureIndexesAsync` so they exist regardless of how the database was populated:
 
 ```csharp
-// AI's initial suggestion — guard only in service layer
-if (existing.Status == OrderStatus.Shipped)
-    return Result.Fail("Cannot modify a shipped order.");
-await _orderRepo.ReplaceAsync(id, updated, ct);
+var products = database.GetCollection<Product>(settings.ProductsCollection);
+await products.Indexes.CreateManyAsync([
+    new CreateIndexModel<Product>(
+        Builders<Product>.IndexKeys.Ascending(x => x.Sku),
+        new CreateIndexOptions { Unique = true, Name = "sku_unique" }),
+    new CreateIndexModel<Product>(
+        Builders<Product>.IndexKeys.Ascending(x => x.StockQuantity),
+        new CreateIndexOptions { Name = "stockQuantity" })
+]);
 ```
-
-**Problem identified:** This creates a TOCTOU race condition. Between the service reading the order status and calling `ReplaceAsync`, another concurrent request could change the order status to Shipped. The guard in the service layer would pass, but the second request would incorrectly replace a Shipped order.
-
-**Human correction:** The guard was pushed into the repository using a compound MongoDB filter, making the check and the replacement an atomic operation:
-
-```csharp
-// Repository-level atomic guard — prevents race condition
-var filter = Filter.And(
-    Filter.Eq(o => o.Id, id),
-    Filter.Ne(o => o.Status, OrderStatus.Shipped)  // Ne = "not equal"
-);
-return await _collection.FindOneAndReplaceAsync(filter, order, options, ct);
-// Returns null if: not found OR status == Shipped
-```
-
-The service layer check was kept as well — it provides a fast-path failure response with a meaningful error message before making a DB round-trip. The repository-level guard is the actual concurrency safety mechanism.
 
 ---
 
@@ -141,7 +91,7 @@ _ = _auditRepo.LogAsync(entry, ct);
 
 ASP.NET Core cancels this token as soon as the HTTP response is sent. Since the fire-and-forget task had not yet started, `InsertOneAsync` received an already-cancelled token, threw `OperationCanceledException`, and the silent try/catch in `LogAsync` discarded it. The collection remained empty.
 
-**Human correction:** Changed all four fire-and-forget `LogAsync` calls to `CancellationToken.None`:
+**Directed fix:** Changed all four fire-and-forget `LogAsync` calls to `CancellationToken.None`:
 
 ```csharp
 // Fixed — audit write lifecycle is independent of the HTTP request
@@ -154,27 +104,19 @@ This was non-obvious because the bug produced no errors — only silent data los
 
 ## Verification: AI-Assisted Test Generation for Edge Cases
 
-AI was prompted with specific edge case scenarios rather than asked to "generate comprehensive tests":
+Tests were generated by specifying exact scenarios rather than asking the AI to "write tests." Each scenario was given with the observable behavior to verify, the specific mock interaction to assert, and the reason the edge case matters.
 
 ### Edge Case: Mid-Checkout Stock Failure Rollback
 
-Prompt given to AI:
-> "Generate a test where the first of two checkout items decrements successfully, but the second item returns null (insufficient stock). Assert that: (a) the result is a failure, (b) IncrementStockAsync is called once for the first item with the exact quantity, (c) CreateAsync is never called on the order repository."
-
-This produced `CheckoutAsync_WhenSecondItemOutOfStock_RollsBackFirstItemAndReturnsFailure` which validates the compensating transaction behavior that is easy to overlook.
+I directed the AI to generate a test for a two-item checkout where the first item decrements successfully but the second fails (insufficient stock). The assertions targeted: the result is a failure, rollback is called for the first item with the exact quantity, and the order repository's `CreateAsync` is never invoked. This validated the compensating transaction behavior that is easy to overlook — the test is `CheckoutAsync_WhenSecondItemOutOfStock_RollsBackFirstItemAndReturnsFailure`.
 
 ### Edge Case: Publisher Failure Does Not Rollback
 
-During review, I identified that the AI's first draft would have rolled back stock if the RabbitMQ publish failed. This is incorrect behavior — the order is already committed to MongoDB, so rolling back stock would create a phantom order with no corresponding inventory decrement.
-
-The AI was prompted:
-> "The event publish is best-effort. If `PublishAsync` throws, log the error and return success — the order is committed. Do NOT roll back stock."
-
-This produced the correct try/catch structure around the publish call that logs but does not propagate the exception.
+I directed a test to verify that a RabbitMQ publish failure after a successful checkout does not roll back the stock or return an error. The order is already committed to MongoDB; rolling back stock would create a phantom order with no inventory decrement. The test is `CheckoutAsync_WhenPublishFails_ReturnsSuccessAndDoesNotRollback`.
 
 ### Edge Case: Zero Delta for Stock Adjustment
 
-The `PATCH /api/products/{id}/stock` endpoint accepts a `delta` field. A zero delta is semantically meaningless and could mask client bugs. The AI was asked to add early rejection before the DB call, resulting in the `AdjustStockAsync_WhenDeltaIsZero_ReturnsFailureWithoutCallingRepo` test that verifies no DB round-trip occurs for this invalid input.
+I directed a test for the `PATCH /api/products/{id}/stock` endpoint to reject a zero `delta` before making any DB call. A zero adjustment is semantically meaningless and could mask client bugs. The test `AdjustStockAsync_WhenDeltaIsZero_ReturnsFailureWithoutCallingRepo` verifies no repository interaction occurs for this invalid input.
 
 ---
 
@@ -198,10 +140,7 @@ The following features were built by the AI at explicit human direction.
 
 **Requested:** Add configuration so the `order.created` queue and binding exist before any message is published, enabling the RabbitMQ Management UI to show queued messages for inspection.
 
-**AI produced:** A `rabbitmq-definitions.json` file mounted into the RabbitMQ container via `docker-compose.yml`. The file pre-declares:
-- A `topic` exchange named `commerce_hub`
-- A durable queue named `order.created`
-- A binding from the exchange to the queue using routing key `order.created`
+**AI produced:** A `rabbitmq-definitions.json` file mounted into the RabbitMQ container via `docker-compose.yml`. The file pre-declares a `topic` exchange named `commerce_hub`, a durable queue named `order.created`, and a binding using routing key `order.created`.
 
 **Why it was needed:** Without the queue declared in advance, RabbitMQ would discard any message published to the exchange before a consumer connected and declared the queue. Pre-configuring via definitions ensures messages are retained and visible in the Management UI at `http://localhost:15672` immediately after checkout, without requiring a running consumer.
 
@@ -211,15 +150,7 @@ The following features were built by the AI at explicit human direction.
 
 **Requested:** Generate integration tests using Testcontainers to spin up real MongoDB and RabbitMQ instances in Docker, testing the full stack from HTTP request to database state.
 
-**AI produced:** An integration test suite (`tests/CommerceHub.Tests/Integration/`) covering:
-- Full checkout happy path: POST → 201, verify order in MongoDB, verify stock decremented
-- Idempotency: same `Idempotency-Key` header on two POST requests returns the same order ID both times
-- Insufficient stock: POST with quantity exceeding stock → 422, verify no order created, verify stock unchanged
-- Stock adjustment happy path: PATCH → 200, verify new stock level in MongoDB
-- Order status update: PUT → 200, verify status change in MongoDB
-- Shipped guard: PUT on a Shipped order → 409 conflict
-
-Tests use `WebApplicationFactory<Program>` with Testcontainers-managed containers, ensuring no mocking of infrastructure — every assertion is against real MongoDB documents.
+**AI produced:** An integration test suite (`tests/CommerceHub.Tests/Integration/`) covering checkout happy path, idempotency replay, insufficient-stock rejection, stock adjustment, order status transitions, and the Shipped terminal-state guard. Tests use `WebApplicationFactory<Program>` with Testcontainers-managed containers — every assertion is against real MongoDB documents.
 
 ---
 
@@ -227,35 +158,7 @@ Tests use `WebApplicationFactory<Program>` with Testcontainers-managed container
 
 **Requested:** Generate a comprehensive manual testing guide with exact curl commands covering all happy paths and edge cases for every endpoint.
 
-**AI produced:** `manualTesting.txt` covering all four system actors:
-- Customer: happy path order, zero/negative quantity rejection, insufficient stock, mid-checkout rollback verification
-- Warehouse: restock, manual decrement, zero delta, negative-beyond-stock, product not found
-- Fulfillment: state machine transitions (Pending → Processing → Shipped), terminal-state lock (409)
-- Downstream: RabbitMQ Management UI inspection of queued `OrderCreatedEvent` payloads
-
-The guide also documents the reset procedure (`docker-compose down -v && docker-compose up --build`) needed to restore seed stock levels between test sessions.
-
----
-
-### Performance and Security Hardening
-
-**Requested:** Identify and implement quick performance and security improvements. Four items were selected from a ranked list and implemented:
-
-**1. Swagger gated to Development environment**
-
-`app.UseSwagger()` and `app.UseSwaggerUI()` were moved inside `if (app.Environment.IsDevelopment())`. Previously, Swagger was unconditionally registered, exposing the full API schema and a browsable UI in production. Gating it to Development eliminates that surface without any runtime cost.
-
-**2. `[MaxLength]` DataAnnotations on all DTO string fields**
-
-`[MaxLength(50)]` was added to `CustomerId` in `CheckoutRequestDto` and `UpdateOrderDto`. `[MaxLength(24, ErrorMessage = "ProductId must be a 24-character ObjectId.")]` was added to `ProductId` in `CheckoutItemDto`. Without these, the model binder would accept arbitrarily long strings before any business logic ran — a low-effort input-size abuse vector. The 24-character limit on `ProductId` also documents the MongoDB ObjectId format constraint directly in the DTO.
-
-**3. Response compression**
-
-`AddResponseCompression(opts => opts.EnableForHttps = true)` was registered in the service collection and `app.UseResponseCompression()` was added to the middleware pipeline. JSON payloads (product lists, order bodies) compress well; this reduces bandwidth for list responses with no application-layer changes.
-
-**4. Products indexes declared at startup**
-
-`sku_unique` (unique index) and `stockQuantity` (ascending index) for the `Products` collection were added to `EnsureIndexesAsync` in `MongoIndexExtensions.cs`. Previously these indexes were only created by the seed script, meaning a fresh container with a different seed path would run the stock-guard `FindOneAndUpdateAsync` filter against an unindexed `stockQuantity` field — a full collection scan on every checkout item. Declaring them at startup guarantees they exist regardless of how the database was populated.
+**AI produced:** `manualTesting.txt` covering all four system actors (Customer, Warehouse Manager, Fulfillment Staff, Downstream Service) with curl commands for every scenario and a reset procedure (`docker-compose down -v && docker-compose up --build`) for restoring seed stock between sessions.
 
 ---
 
