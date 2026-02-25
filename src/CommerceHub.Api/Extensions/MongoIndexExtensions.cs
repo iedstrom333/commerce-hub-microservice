@@ -1,6 +1,5 @@
 using CommerceHub.Api.Configuration;
 using CommerceHub.Api.Models;
-using MongoDB.Bson;
 using MongoDB.Driver;
 
 namespace CommerceHub.Api.Extensions;
@@ -15,12 +14,11 @@ public static class MongoIndexExtensions
             new CreateIndexModel<AuditLog>(
                 Builders<AuditLog>.IndexKeys
                     .Ascending(x => x.EntityId)
-                    .Descending(x => x.Timestamp),
-                new CreateIndexOptions { Name = "entityId_timestamp" }),
+                    .Descending(x => x.Timestamp)),
             // Look up all audit entries linked to a specific order
             new CreateIndexModel<AuditLog>(
                 Builders<AuditLog>.IndexKeys.Ascending(x => x.RelatedOrderId),
-                new CreateIndexOptions { Sparse = true, Name = "relatedOrderId" })
+                new CreateIndexOptions { Sparse = true })
         ]);
 
         var orders = database.GetCollection<Order>(settings.OrdersCollection);
@@ -33,10 +31,9 @@ public static class MongoIndexExtensions
         await products.Indexes.CreateManyAsync([
             new CreateIndexModel<Product>(
                 Builders<Product>.IndexKeys.Ascending(x => x.Sku),
-                new CreateIndexOptions { Unique = true, Name = "sku_unique" }),
+                new CreateIndexOptions { Unique = true }),
             new CreateIndexModel<Product>(
-                Builders<Product>.IndexKeys.Ascending(x => x.StockQuantity),
-                new CreateIndexOptions { Name = "stockQuantity" })
+                Builders<Product>.IndexKeys.Ascending(x => x.StockQuantity))
         ]);
 
         // IdempotencyKeys: TTL index expires documents after 24 hours automatically.
@@ -44,6 +41,6 @@ public static class MongoIndexExtensions
         await idempotencyKeys.Indexes.CreateOneAsync(
             new CreateIndexModel<IdempotencyKey>(
                 Builders<IdempotencyKey>.IndexKeys.Ascending(x => x.CreatedAt),
-                new CreateIndexOptions { ExpireAfter = TimeSpan.FromHours(24), Name = "ttl_createdAt_24h" }));
+                new CreateIndexOptions { ExpireAfter = TimeSpan.FromHours(24) }));
     }
 }
